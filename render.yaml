@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: gcloud-cloud-shell
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: MONGO_URI
+        sync: false
+      - key: MONGO_DB
+        value: gcloud_shell
+      - key: FAIL_THRESHOLD
+        value: "5"
+      - key: SHORT_SESSION_SECONDS
+        value: "60"
+      - key: SSH_ALIVE_INTERVAL
+        value: "30"
+      - key: SSH_ALIVE_COUNT
+        value: "60"
+      - key: RECONNECT_DELAY
+        value: "10"
+    plan: starter
+    healthCheckPath: /health
