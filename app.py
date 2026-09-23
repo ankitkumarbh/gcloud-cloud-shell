@@ -211,38 +211,30 @@ class CloudShellConnection:
     def _write_tunnel_script(self) -> str:
         """Write the tunnel script (like run_gcloud.sh) to /tmp."""
         restart_counter = "/tmp/tunnel_restarts"
-        quota_flag = "/tmp/tunnel_quota_hit"
         start_sh = os.path.join(os.path.dirname(os.path.abspath(__file__)), "start.sh")
-        tunnel_log = self._tunnel_log
         script = """#!/bin/bash
 export TERM=xterm
 export HOME="${HOME:-/root}"
 export PATH="/usr/lib/google-cloud-sdk/bin:$HOME/.local/bin:$PATH"
 echo 0 > """ + restart_counter + """
-echo 0 > """ + quota_flag + """
 while true; do
     echo "[$(date)] SCP start.sh + starting SSH session..."
     START_TIME=$(date +%s)
-    gcloud cloud-shell scp localhost:""" + start_sh + """ cloudshell:~/start.sh 2>>""" + tunnel_log + """ && gcloud cloud-shell ssh \\
+    gcloud cloud-shell scp localhost:""" + start_sh + """ cloudshell:~/start.sh 2>>""" + self._tunnel_log + """ && gcloud cloud-shell ssh \\
         --ssh-flag="-o ServerAliveInterval=30" \\
         --ssh-flag="-o ServerAliveCountMax=120" \\
-        2>>""" + tunnel_log + """
+        2>>""" + self._tunnel_log + """
     EXIT_CODE=$?
     END_TIME=$(date +%s)
     DURATION=$(( END_TIME - START_TIME ))
     echo "[$(date)] Session ended (exit=$EXIT_CODE, duration=${DURATION}s). Reconnecting in 5s..."
-    QUOTA=$(grep -i -E 'quota.?exceeded|RESOURCE_EXHAUSTED|rate.?limit|too many requests|has been exceeded|Cloud Shell quota|429' """ + tunnel_log + """ | tail -1)
-    if [ -n "$QUOTA" ] && [ $DURATION -lt 60 ]; then
+    if [ $DURATION -lt 60 ]; then
         COUNT=$(cat """ + restart_counter + """ 2>/dev/null || echo 0)
         COUNT=$(( COUNT + 1 ))
         echo $COUNT > """ + restart_counter + """
-        echo 1 > """ + quota_flag + """
-        echo "[$(date)] QUOTA ERROR detected: $QUOTA (count=$COUNT)"
-    elif [ $DURATION -lt 60 ]; then
-        echo "[$(date)] Short session (${DURATION}s) but NO quota error - not counting"
+        echo "[$(date)] SHORT session (${DURATION}s) = possible quota hit. Restart count: $COUNT"
     else
         echo 0 > """ + restart_counter + """
-        echo 0 > """ + quota_flag + """
         echo "[$(date)] Long session (${DURATION}s) = normal reset."
     fi
     sleep 5
@@ -454,15 +446,6 @@ def _get_tunnel_restart_count() -> int:
         return 0
 
 
-def _is_quota_hit() -> bool:
-    """Check if quota error was detected by tunnel script."""
-    try:
-        with open("/tmp/tunnel_quota_hit") as f:
-            return f.read().strip() == "1"
-    except Exception:
-        return False
-
-
 def _is_bot_running() -> bool:
     """Check if bot process is alive on Cloud Shell."""
     rc, out = _shell_run(
@@ -509,9 +492,8 @@ def _keepalive_loop():
                 break
 
             tunnel_restarts = _get_tunnel_restart_count()
-            quota_hit = _is_quota_hit()
             if tunnel_restarts > 0:
-                _log(f"[keepalive] Tunnel restart count: {tunnel_restarts}/{FAIL_THRESHOLD} quota={quota_hit}")
+                _log(f"[keepalive] Tunnel restart count: {tunnel_restarts}/{FAIL_THRESHOLD}")
 
             if alive:
                 fail_count = 0
@@ -526,11 +508,12 @@ def _keepalive_loop():
                     _log("[keepalive] Bot not running yet (.bashrc handling)")
             else:
                 _log("[keepalive] Ping failed")
-                fail_count += 1
+                fail_count = max(fail_count + 1, tunnel_restarts)
                 _log(f"[keepalive] Fails: {fail_count}/{FAIL_THRESHOLD}")
 
-            if quota_hit and tunnel_restarts >= FAIL_THRESHOLD:
-                _log(f"[keepalive] QUOTA HIT detected ({tunnel_restarts} quota errors)!")
+            if not alive or tunnel_restarts >= FAIL_THRESHOLD:
+                if tunnel_restarts >= FAIL_THRESHOLD:
+                    _log(f"[keepalive] Tunnel detected {tunnel_restarts} rapid restarts = QUOTA HIT!")
                 _update_status(status="disconnected", last_disconnect=time.time())
 
                 next_acc = _get_next_account(current_account)
