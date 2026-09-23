@@ -1187,8 +1187,9 @@ async function saveStartSh(){
 
 setInterval(tmuxRefresh,60000);
 
+let _scrollTimer=null;
 const es=new EventSource('/log/stream');
-es.onmessage=e=>{try{const d=JSON.parse(e.data);if(d.text){term.writeln(d.text);term.scrollToBottom()}}catch(ex){}};
+es.onmessage=e=>{try{const d=JSON.parse(e.data);if(d.text){term.writeln(d.text);if(_scrollTimer)clearTimeout(_scrollTimer);_scrollTimer=setTimeout(()=>{term.scrollToBottom();_scrollTimer=null},50)}}catch(ex){}};
 es.onerror=()=>{setTimeout(()=>{try{es.close()}catch(e){};setTimeout(()=>location.reload(),5000)},3000)};
 
 const sse=new EventSource('/status/stream');
