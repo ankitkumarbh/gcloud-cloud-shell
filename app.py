@@ -211,31 +211,38 @@ class CloudShellConnection:
     def _write_tunnel_script(self) -> str:
         """Write the tunnel script (like run_gcloud.sh) to /tmp."""
         restart_counter = "/tmp/tunnel_restarts"
+        ssh_started = "/tmp/tunnel_ssh_started"
         start_sh = os.path.join(os.path.dirname(os.path.abspath(__file__)), "start.sh")
         script = """#!/bin/bash
 export TERM=xterm
 export HOME="${HOME:-/root}"
 export PATH="/usr/lib/google-cloud-sdk/bin:$HOME/.local/bin:$PATH"
 echo 0 > """ + restart_counter + """
+echo 0 > """ + ssh_started + """
 while true; do
     echo "[$(date)] SCP start.sh + starting SSH session..."
     START_TIME=$(date +%s)
-    gcloud cloud-shell scp localhost:""" + start_sh + """ cloudshell:~/start.sh 2>>""" + self._tunnel_log + """ && gcloud cloud-shell ssh \\
+    gcloud cloud-shell scp localhost:""" + start_sh + """ cloudshell:~/start.sh 2>>""" + self._tunnel_log + """ && \\
+    echo 1 > """ + ssh_started + """ && \\
+    gcloud cloud-shell ssh \\
         --ssh-flag="-o ServerAliveInterval=30" \\
         --ssh-flag="-o ServerAliveCountMax=120" \\
         2>>""" + self._tunnel_log + """
     EXIT_CODE=$?
+    SSH_STARTED=$(cat """ + ssh_started + """ 2>/dev/null || echo 0)
     END_TIME=$(date +%s)
     DURATION=$(( END_TIME - START_TIME ))
-    echo "[$(date)] Session ended (exit=$EXIT_CODE, duration=${DURATION}s). Reconnecting in 5s..."
-    if [ $DURATION -lt 60 ]; then
+    echo 0 > """ + ssh_started + """
+    if [ "$SSH_STARTED" != "1" ]; then
+        echo "[$(date)] SCP failed (no SSH). Not counting as quota failure."
+    elif [ $DURATION -gt 60 ]; then
+        echo 0 > """ + restart_counter + """
+        echo "[$(date)] Session ended after ${DURATION}s (Normal reset)."
+    else
         COUNT=$(cat """ + restart_counter + """ 2>/dev/null || echo 0)
         COUNT=$(( COUNT + 1 ))
         echo $COUNT > """ + restart_counter + """
         echo "[$(date)] SHORT session (${DURATION}s) = possible quota hit. Restart count: $COUNT"
-    else
-        echo 0 > """ + restart_counter + """
-        echo "[$(date)] Long session (${DURATION}s) = normal reset."
     fi
     sleep 5
 done
