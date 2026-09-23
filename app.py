@@ -511,9 +511,8 @@ def _keepalive_loop():
                 fail_count = max(fail_count + 1, tunnel_restarts)
                 _log(f"[keepalive] Fails: {fail_count}/{FAIL_THRESHOLD}")
 
-            if not alive or tunnel_restarts >= FAIL_THRESHOLD:
-                if tunnel_restarts >= FAIL_THRESHOLD:
-                    _log(f"[keepalive] Tunnel detected {tunnel_restarts} rapid restarts = QUOTA HIT!")
+            if tunnel_restarts >= FAIL_THRESHOLD:
+                _log(f"[keepalive] Tunnel detected {tunnel_restarts} rapid restarts = QUOTA HIT!")
                 _update_status(status="disconnected", last_disconnect=time.time())
 
                 next_acc = _get_next_account(current_account)
