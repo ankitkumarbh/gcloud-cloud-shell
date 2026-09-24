@@ -350,7 +350,7 @@ done
     def _is_alive(self) -> bool:
         return self.connected and self.proc and self.proc.poll() is None
 
-    def _run(self, command: str, timeout: int = 30) -> tuple[int, str]:
+    def _run(self, command: str, timeout: int = None) -> tuple[int, str]:
         if not self._ensure_tunnel():
             return -1, "Connection failed"
         return _run_gcloud_command(command, timeout)
@@ -363,7 +363,7 @@ def _shell_connect() -> bool:
     return _shell_conn.connect()
 
 
-def _shell_run(command: str, timeout: int = 30) -> tuple[int, str]:
+def _shell_run(command: str, timeout: int = None) -> tuple[int, str]:
     return _shell_conn._run(command, timeout)
 
 
@@ -374,7 +374,7 @@ def _tmux_capture_cached() -> str:
         output = _tmux_cache["output"]
     if stale:
         def _refresh():
-            rc, out = _shell_run("tmux capture-pane -t main -p -S -10000 2>/dev/null", timeout=15)
+            rc, out = _shell_run("tmux capture-pane -t main -p -S -10000 2>/dev/null")
             with _tmux_lock:
                 _tmux_cache["output"] = out if rc == 0 and out else "[no output]"
                 _tmux_cache["time"] = time.time()
@@ -382,7 +382,7 @@ def _tmux_capture_cached() -> str:
     return output
 
 
-def _run_gcloud_command(command: str, timeout: int = 300) -> tuple[int, str]:
+def _run_gcloud_command(command: str, timeout: int = None) -> tuple[int, str]:
     cmd = [
         "gcloud", "cloud-shell", "ssh",
         "--authorize-session",
@@ -393,7 +393,10 @@ def _run_gcloud_command(command: str, timeout: int = 300) -> tuple[int, str]:
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
         )
-        out, err = proc.communicate(timeout=timeout)
+        if timeout:
+            out, err = proc.communicate(timeout=timeout)
+        else:
+            out, err = proc.communicate()
         _shell_conn.last_activity = time.time()
         return proc.returncode, out.strip()
     except subprocess.TimeoutExpired:
@@ -407,7 +410,7 @@ def _shell_start_tmux():
     """Check if bot is running on Cloud Shell. .bashrc handles tmux + start.sh + bot."""
     _log("[shell] Checking bot status...")
     check = "tmux has-session -t main 2>/dev/null && echo all_running || echo needs_restart"
-    rc, out = _shell_run(check, timeout=15)
+    rc, out = _shell_run(check)
     if "all_running" in out:
         _log("[shell] Bot + keepalive already running")
         return True
@@ -429,7 +432,7 @@ def _keepalive_ping() -> bool:
         if not _shell_conn._reconnect():
             return False
 
-    rc, out = _shell_run("echo ping_ok", timeout=20)
+    rc, out = _shell_run("echo ping_ok")
     ok = rc == 0 and "ping_ok" in out
     if ok:
         _update_status(last_keepalive=time.time())
@@ -450,7 +453,6 @@ def _is_bot_running() -> bool:
     """Check if bot process is alive on Cloud Shell."""
     rc, out = _shell_run(
         "tmux has-session -t main 2>/dev/null && echo yes || echo no",
-        timeout=15,
     )
     return "yes" in out
 
@@ -520,7 +522,7 @@ def _keepalive_loop():
                     _log(f"Quota hit. Switching: {current_account} -> {next_acc}")
 
                     _log("[keepalive] Killing old bot on Cloud Shell...")
-                    _shell_run("tmux kill-session -t main 2>/dev/null; pkill -f cloud_keepalive 2>/dev/null; pkill -f AnonXMusic 2>/dev/null", timeout=10)
+                    _shell_run("tmux kill-session -t main 2>/dev/null; pkill -f cloud_keepalive 2>/dev/null; pkill -f AnonXMusic 2>/dev/null")
 
                     _set_account(next_acc)
                     mongo_store.set_default_account(next_acc)
@@ -772,7 +774,7 @@ def _dashboard_switch_reconnect(email: str):
     """Kill everything old, then reconnect with new account."""
     try:
         _log(f"[switch] Killing old bot on Cloud Shell...")
-        _shell_run("tmux kill-session -t main 2>/dev/null; pkill -f cloud_keepalive 2>/dev/null; pkill -f AnonXMusic 2>/dev/null", timeout=10)
+        _shell_run("tmux kill-session -t main 2>/dev/null; pkill -f cloud_keepalive 2>/dev/null; pkill -f AnonXMusic 2>/dev/null")
 
         _log(f"[switch] Killing old gcloud processes on Render...")
         subprocess.run(["pkill", "-f", "gcloud cloud-shell"], timeout=5)
@@ -815,7 +817,6 @@ def kill_bot():
             "pkill -f cloud_keepalive 2>/dev/null; "
             "pkill -f AnonXMusic 2>/dev/null; "
             "echo killed",
-            timeout=15,
         )
         _log(f"[kill-bot] rc={rc} out={out}")
 
@@ -907,7 +908,7 @@ def tmux_send():
     keys = data.get("keys", "")
     if not keys:
         return jsonify({"error": "keys required"}), 400
-    _executor.submit(_shell_run, f"tmux send-keys -t main '{keys}' Enter", 15)
+    _executor.submit(_shell_run, f"tmux send-keys -t main '{keys}' Enter")
     return jsonify({"status": "sent"})
 
 
