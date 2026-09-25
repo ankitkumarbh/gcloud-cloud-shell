@@ -17,7 +17,6 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 from collections import deque
 from flask import Flask, request, jsonify, Response, render_template_string, session, redirect, url_for
-from simple_websocket import Server, ConnectionClosed
 import zoneinfo
 
 _TZ_IST = zoneinfo.ZoneInfo("Asia/Kolkata")
@@ -918,93 +917,156 @@ def tmux_send():
     return jsonify({"status": "sent"})
 
 
+class RenderShellPTY:
+    """Persistent PTY session for Render container shell."""
+
+    def __init__(self):
+        self.pid = None
+        self.master_fd = None
+        self.output_buffer = deque(maxlen=100000)
+        self.subscribers: list[queue.Queue] = []
+        self.lock = threading.Lock()
+        self.alive = False
+        self.reader_thread = None
+
+    def start(self, cols=80, rows=24):
+        if self.alive:
+            return
+        self.pid, self.master_fd = pty.fork()
+        if self.pid == 0:
+            os.environ["TERM"] = "xterm-256color"
+            os.environ["COLUMNS"] = str(cols)
+            os.environ["LINES"] = str(rows)
+            os.execvp("/bin/bash", ["/bin/bash", "-l"])
+        os.set_blocking(self.master_fd, False)
+        fcntl.ioctl(self.master_fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+        self.alive = True
+        self.reader_thread = threading.Thread(target=self._reader, daemon=True)
+        self.reader_thread.start()
+        _log("[render-shell] PTY started")
+
+    def _reader(self):
+        while self.alive and self.master_fd is not None:
+            try:
+                r, _, _ = select.select([self.master_fd], [], [], 0.1)
+                if r:
+                    data = os.read(self.master_fd, 4096)
+                    if not data:
+                        break
+                    with self.lock:
+                        self.output_buffer.append(data.decode("utf-8", errors="replace"))
+                        dead = []
+                        for q in self.subscribers:
+                            try:
+                                q.put_nowait(data.decode("utf-8", errors="replace"))
+                            except queue.Full:
+                                dead.append(q)
+                        for q in dead:
+                            self.subscribers.remove(q)
+            except (OSError, TypeError):
+                break
+        self.alive = False
+        _log("[render-shell] PTY reader stopped")
+
+    def write(self, data: str):
+        if self.alive and self.master_fd is not None:
+            try:
+                os.write(self.master_fd, data.encode())
+                return True
+            except OSError:
+                pass
+        return False
+
+    def resize(self, cols: int, rows: int):
+        if self.alive and self.master_fd is not None:
+            try:
+                fcntl.ioctl(self.master_fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+                return True
+            except OSError:
+                pass
+        return False
+
+    def stop(self):
+        self.alive = False
+        if self.master_fd is not None:
+            try:
+                os.close(self.master_fd)
+            except Exception:
+                pass
+            self.master_fd = None
+        if self.pid:
+            try:
+                os.kill(self.pid, 9)
+            except Exception:
+                pass
+            self.pid = None
+        _log("[render-shell] PTY stopped")
+
+    def get_output(self) -> str:
+        with self.lock:
+            return "".join(self.output_buffer)
+
+
+_render_shell_pty = RenderShellPTY()
+
+
 @app.route("/render-shell")
 @login_required
 def render_shell_page():
+    if not _render_shell_pty.alive:
+        _render_shell_pty.start()
     return render_template_string(RENDER_SHELL_HTML)
 
 
-@app.route("/ws/shell")
-def ws_shell():
-    _log(f"[render-shell] Headers: {dict(request.headers)}")
-    _log(f"[render-shell] Environ CONNECTION={request.environ.get('HTTP_CONNECTION')} UPGRADE={request.environ.get('HTTP_UPGRADE')}")
-    try:
-        ws = Server.accept(request.environ)
-    except Exception as e:
-        _log(f"[render-shell] WebSocket accept failed: {e}")
-        return f"WebSocket failed: {e}", 500
-    if ws is None:
-        _log("[render-shell] Server.accept returned None")
-        return "WebSocket upgrade failed", 400
-
-    if AUTH_PASSWORD:
-        token = request.args.get("token", "")
-        authed = session.get("authed") or (token and secrets.compare_digest(token, AUTH_PASSWORD))
-        if not authed:
-            ws.close()
-            return "Unauthorized", 401
-
-    _log("[render-shell] Client connected")
-
-    pid, master_fd = pty.fork()
-    if pid == 0:
-        os.environ["TERM"] = "xterm-256color"
-        os.environ["COLUMNS"] = "80"
-        os.environ["LINES"] = "24"
-        os.execvp("/bin/bash", ["/bin/bash", "-l"])
-
-    os.set_blocking(master_fd, False)
-    fcntl.ioctl(master_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
-
-    def winch_handler(signum, frame):
-        pass
-
-    def pty_reader():
+@app.route("/render-shell/output")
+@login_required
+def render_shell_output():
+    def generate():
+        q = queue.Queue(maxsize=500)
+        with _render_shell_pty.lock:
+            initial = "".join(_render_shell_pty.output_buffer)
+            _render_shell_pty.subscribers.append(q)
+        if initial:
+            yield f"data: {json.dumps({'text': initial})}\n\n"
         try:
-            while True:
-                r, _, _ = select.select([master_fd], [], [], 0.1)
-                if r:
-                    try:
-                        data = os.read(master_fd, 4096)
-                        if not data:
-                            break
-                        ws.send(data)
-                    except (OSError, ConnectionClosed):
-                        break
-        except Exception:
-            pass
+            while _render_shell_pty.alive:
+                try:
+                    chunk = q.get(timeout=15)
+                    yield f"data: {json.dumps({'text': chunk})}\n\n"
+                except queue.Empty:
+                    yield f"data: {json.dumps({'ping': True})}\n\n"
+        except GeneratorExit:
+            with _render_shell_pty.lock:
+                if q in _render_shell_pty.subscribers:
+                    _render_shell_pty.subscribers.remove(q)
+    return Response(generate(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    reader_thread = threading.Thread(target=pty_reader, daemon=True)
-    reader_thread.start()
 
-    try:
-        while True:
-            try:
-                msg = ws.receive(timeout=30)
-            except Exception:
-                break
-            if msg is None:
-                break
-            if isinstance(msg, bytes):
-                os.write(master_fd, msg)
-            else:
-                os.write(master_fd, msg.encode())
-    except ConnectionClosed:
-        pass
-    except Exception:
-        pass
-    finally:
-        try:
-            os.close(master_fd)
-        except Exception:
-            pass
-        try:
-            os.kill(pid, 9)
-        except Exception:
-            pass
-        _log("[render-shell] Client disconnected")
+@app.route("/render-shell/input", methods=["POST"])
+@login_required
+def render_shell_input():
+    if not _render_shell_pty.alive:
+        _render_shell_pty.start()
+    data = request.get_json(force=True)
+    keys = data.get("keys", "")
+    cols = data.get("cols", 80)
+    rows = data.get("rows", 24)
+    if data.get("resize"):
+        _render_shell_pty.resize(cols, rows)
+        return jsonify({"status": "resized"})
+    if keys:
+        _render_shell_pty.write(keys)
+    return jsonify({"status": "ok"})
 
-    return "", 200
+
+@app.route("/render-shell/restart", methods=["POST"])
+@login_required
+def render_shell_restart():
+    _render_shell_pty.stop()
+    time.sleep(0.5)
+    _render_shell_pty.start()
+    return jsonify({"status": "restarted"})
 
 
 RENDER_SHELL_HTML = r"""<!DOCTYPE html>
@@ -1047,24 +1109,32 @@ const fitAddon=new FitAddon.FitAddon();
 term.loadAddon(fitAddon);
 term.open(document.getElementById('term'));
 fitAddon.fit();
-window.addEventListener('resize',()=>fitAddon.fit());
 term.focus();
 
 const status=document.getElementById('connStatus');
-const proto=location.protocol==='https:'?'wss':'ws';
-const ws=new WebSocket(`${proto}://${location.host}/ws/shell`);
 
-ws.onopen=()=>{status.textContent='Connected';status.className='status on'};
-ws.onclose=()=>{status.textContent='Disconnected';status.className='status off';setTimeout(()=>location.reload(),3000)};
-ws.onerror=()=>{status.textContent='Error';status.className='status off'};
+async function sendInput(keys){
+  const {cols,rows}=term;
+  try{await fetch('/render-shell/input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keys,cols,rows})})}catch(e){}
+}
 
-ws.onmessage=e=>{if(typeof e.data==='string')term.write(e.data);else term.write(new Uint8Array(e.data))};
-
-term.onData(d=>{if(ws.readyState===1)ws.send(d)});
+term.onData(d=>sendInput(d));
 
 term.onResize(({cols,rows})=>{
-  if(ws.readyState===1)ws.send(JSON.stringify({type:'resize',cols,rows}));
+  fetch('/render-shell/input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({resize:true,cols,rows})}).catch(()=>{});
 });
+
+window.addEventListener('resize',()=>{fitAddon.fit();term.focus()});
+
+const es=new EventSource('/render-shell/output');
+es.onopen=()=>{status.textContent='Connected';status.className='status on'};
+es.onerror=()=>{status.textContent='Reconnecting...';status.className='status off'};
+es.onmessage=e=>{
+  try{
+    const d=JSON.parse(e.data);
+    if(d.text){term.write(d.text);term.scrollToBottom()}
+  }catch(ex){}
+};
 </script>
 </body>
 </html>"""
