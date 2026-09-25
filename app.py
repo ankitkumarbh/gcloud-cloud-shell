@@ -926,12 +926,15 @@ def render_shell_page():
 
 @app.route("/ws/shell")
 def ws_shell():
+    _log(f"[render-shell] Headers: {dict(request.headers)}")
+    _log(f"[render-shell] Environ CONNECTION={request.environ.get('HTTP_CONNECTION')} UPGRADE={request.environ.get('HTTP_UPGRADE')}")
     try:
         ws = Server.accept(request.environ)
     except Exception as e:
         _log(f"[render-shell] WebSocket accept failed: {e}")
         return f"WebSocket failed: {e}", 500
     if ws is None:
+        _log("[render-shell] Server.accept returned None")
         return "WebSocket upgrade failed", 400
 
     if AUTH_PASSWORD:
