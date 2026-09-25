@@ -661,7 +661,9 @@ def logout():
 @app.route("/")
 @login_required
 def index():
-    return render_template_string(DASHBOARD_HTML)
+    resp = make_response(render_template_string(DASHBOARD_HTML, build_id=BUILD_ID))
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    return resp
 
 
 @app.route("/health")
@@ -1029,10 +1031,14 @@ class RenderShellPTY:
 
 _render_shell_pty = RenderShellPTY()
 
+BUILD_ID = str(int(time.time()))
+
 
 @app.route("/render-shell")
 @login_required
 def render_shell_page():
+    if request.args.get("v") != BUILD_ID:
+        return redirect(f"/render-shell?v={BUILD_ID}")
     if not _render_shell_pty.alive:
         _render_shell_pty.start()
     resp = make_response(render_template_string(RENDER_SHELL_HTML))
@@ -1431,7 +1437,7 @@ a{color:var(--blue)}
   <h1>GCloud Shell</h1>
   <span class="badge initializing" id="badge">initializing</span>
   <span style="flex:1"></span>
-  <a href="/render-shell" style="font-size:12px;color:var(--blue);text-decoration:none;padding:4px 8px;border:1px solid var(--border);border-radius:6px">Render Shell</a>
+  <a href="/render-shell?v={{build_id}}" style="font-size:12px;color:var(--blue);text-decoration:none;padding:4px 8px;border:1px solid var(--border);border-radius:6px">Render Shell</a>
   <span id="uptime" style="font-size:11px;color:var(--dim)"></span>
 </div>
 <div class="content">
