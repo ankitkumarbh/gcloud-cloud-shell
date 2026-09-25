@@ -1263,29 +1263,6 @@ if(term._core&&term._core._compositionHelper){
   ch.compositionend=function(){};
 }
 
-let isIme229=false;
-if(term.textarea){
-  term.textarea.addEventListener('keydown',e=>{
-    isIme229=(e.keyCode===229);
-  },true);
-
-  term.textarea.addEventListener('beforeinput',e=>{
-    if(isIme229||e.inputType==='insertCompositionText'||e.inputType==='insertFromComposition'||e.inputType==='deleteContentBackward'||e.inputType==='insertLineBreak'){
-      if(e.cancelable)e.preventDefault();
-      if(e.data){
-        sendRaw(e.data);
-      }else if(e.inputType==='deleteContentBackward'){
-        sendRaw('\x7f');
-      }else if(e.inputType==='deleteWordBackward'){
-        sendRaw('\x17');
-      }else if(e.inputType==='insertLineBreak'){
-        sendRaw('\r');
-      }
-      setTimeout(()=>{if(term.textarea)term.textarea.value='';},0);
-    }
-  },true);
-}
-
 fitAddon.fit();
 
 function syncIme(){}
@@ -1364,6 +1341,9 @@ term.onData(d=>{
   if(/^\x1b\[\d+;\d+R$/.test(d)){ sendRaw(d); return; }
   const isChar=d.length===1&&!d.startsWith('\x1b');
   sendRaw(buildInput(d,isChar));
+  if(term.textarea&&(d==='\r'||term.textarea.value.length>64)){
+    term.textarea.value='';
+  }
   try{
     if(term.buffer.active.viewportY<term.buffer.active.baseY-1) term.scrollToBottom();
   }catch(e){}
