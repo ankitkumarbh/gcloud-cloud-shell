@@ -16,6 +16,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 from collections import deque
+from urllib.parse import urlencode
 from flask import Flask, request, jsonify, Response, render_template_string, session, redirect, url_for, make_response
 import zoneinfo
 
@@ -1038,7 +1039,9 @@ BUILD_ID = str(int(time.time()))
 @login_required
 def render_shell_page():
     if request.args.get("v") != BUILD_ID:
-        return redirect(f"/render-shell?v={BUILD_ID}")
+        args = request.args.to_dict()
+        args["v"] = BUILD_ID
+        return redirect(f"/render-shell?{urlencode(args)}")
     if not _render_shell_pty.alive:
         _render_shell_pty.start()
     resp = make_response(render_template_string(RENDER_SHELL_HTML))
