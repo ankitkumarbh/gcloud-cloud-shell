@@ -928,10 +928,16 @@ class RenderShellPTY:
         self.lock = threading.Lock()
         self.alive = False
         self.reader_thread = None
+        self.seq = 0
+        self.buffer_start_seq = 0
 
     def start(self, cols=80, rows=24):
         if self.alive:
             return
+        with self.lock:
+            self.output_buffer.clear()
+            self.seq = 0
+            self.buffer_start_seq = 0
         self.pid, self.master_fd = pty.fork()
         if self.pid == 0:
             os.environ["TERM"] = "xterm-256color"
@@ -953,12 +959,16 @@ class RenderShellPTY:
                     data = os.read(self.master_fd, 4096)
                     if not data:
                         break
+                    text = data.decode("utf-8", errors="replace")
                     with self.lock:
-                        self.output_buffer.append(data.decode("utf-8", errors="replace"))
+                        if len(self.output_buffer) == self.output_buffer.maxlen:
+                            self.buffer_start_seq += len(self.output_buffer[0])
+                        self.output_buffer.append(text)
+                        self.seq += len(text)
                         dead = []
                         for q in self.subscribers:
                             try:
-                                q.put_nowait(data.decode("utf-8", errors="replace"))
+                                q.put_nowait(text)
                             except queue.Full:
                                 dead.append(q)
                         for q in dead:
@@ -1021,24 +1031,50 @@ def render_shell_page():
 @app.route("/render-shell/output")
 @login_required
 def render_shell_output():
+    try:
+        last_id = int(request.headers.get("Last-Event-ID", "") or "0")
+    except ValueError:
+        last_id = 0
+
     def generate():
-        q = queue.Queue(maxsize=500)
+        q = queue.Queue(maxsize=2000)
         with _render_shell_pty.lock:
-            initial = "".join(_render_shell_pty.output_buffer)
             _render_shell_pty.subscribers.append(q)
-        if initial:
-            yield f"data: {json.dumps({'text': initial})}\n\n"
+            buf_text = "".join(_render_shell_pty.output_buffer)
+            buf_start = _render_shell_pty.buffer_start_seq
+            seq_now = _render_shell_pty.seq
+
+        if last_id <= buf_start and buf_text:
+            send = buf_text[-100000:]
+            start_pos = seq_now - len(send)
+        elif last_id < seq_now and buf_text:
+            offset = max(0, last_id - buf_start)
+            send = buf_text[offset:]
+            start_pos = last_id
+        else:
+            send = ""
+            start_pos = seq_now
+
+        if send:
+            yield f"id: {start_pos + len(send)}\ndata: {json.dumps({'text': send})}\n\n"
+
+        pos = start_pos + len(send)
         try:
             while _render_shell_pty.alive:
                 try:
                     chunk = q.get(timeout=15)
-                    yield f"data: {json.dumps({'text': chunk})}\n\n"
                 except queue.Empty:
-                    yield f"data: {json.dumps({'ping': True})}\n\n"
+                    yield ": ping\n\n"
+                    continue
+                pos += len(chunk)
+                yield f"id: {pos}\ndata: {json.dumps({'text': chunk})}\n\n"
         except GeneratorExit:
+            pass
+        finally:
             with _render_shell_pty.lock:
                 if q in _render_shell_pty.subscribers:
                     _render_shell_pty.subscribers.remove(q)
+
     return Response(generate(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -1073,37 +1109,80 @@ RENDER_SHELL_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
 <title>Render Shell</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#0a0e14;color:#c8cdd5;font-family:-apple-system,system-ui,sans-serif;overflow:hidden;height:100vh;display:flex;flex-direction:column}
-.header{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid #1e2530;background:#131720;flex-shrink:0}
-.header h1{font-size:14px;font-weight:700;color:#fff}
-.header a{color:#3b82f6;font-size:12px;text-decoration:none;margin-left:auto}
-#term{flex:1;padding:4px}
-.xterm-viewport::-webkit-scrollbar{width:4px}
-.xterm-viewport::-webkit-scrollbar-thumb{background:#1e2530;border-radius:2px}
-.status{font-size:11px;padding:2px 8px;border-radius:6px}
+html{height:100%}
+body{background:#0a0e14;color:#c8cdd5;font-family:-apple-system,system-ui,sans-serif;overflow:hidden;height:100%;height:100dvh;display:flex;flex-direction:column;-webkit-tap-highlight-color:transparent}
+.header{display:flex;align-items:center;gap:8px;padding:7px 10px;border-bottom:1px solid #1e2530;background:#131720;flex-shrink:0;padding-top:calc(7px + env(safe-area-inset-top))}
+.header h1{font-size:13px;font-weight:700;color:#fff;white-space:nowrap}
+.header a{color:#3b82f6;font-size:11px;text-decoration:none;white-space:nowrap}
+.status{font-size:10px;padding:2px 7px;border-radius:6px;white-space:nowrap}
 .status.on{background:#052e16;color:#22c55e}
 .status.off{background:#450a0a;color:#ef4444}
+#termWrap{flex:1;min-height:0;position:relative;overflow:hidden}
+#term{position:absolute;inset:0;padding:3px 2px}
+.xterm-viewport::-webkit-scrollbar{width:4px}
+.xterm-viewport::-webkit-scrollbar-thumb{background:#1e2530;border-radius:2px}
+
+.keys{display:flex;gap:5px;overflow-x:auto;white-space:nowrap;flex-shrink:0;padding:6px 8px;padding-bottom:calc(6px + env(safe-area-inset-bottom));background:#131720;border-top:1px solid #1e2530;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+.keys::-webkit-scrollbar{display:none}
+.kb{flex-shrink:0;min-width:38px;height:38px;padding:0 10px;background:#1a2030;border:1px solid #2a3345;border-radius:7px;color:#c8cdd5;font-size:13px;font-family:ui-monospace,Menlo,monospace;cursor:pointer;user-select:none;-webkit-user-select:none;touch-action:manipulation;display:flex;align-items:center;justify-content:center}
+.kb:active{background:#2563eb;border-color:#2563eb;color:#fff}
+.kb.armed{background:#2563eb;border-color:#60a5fa;color:#fff;box-shadow:0 0 0 2px #2563eb55}
+.row2{display:flex;gap:5px;overflow-x:auto;flex-shrink:0;padding:0 8px 6px;background:#131720;scrollbar-width:none;padding-bottom:calc(6px + env(safe-area-inset-bottom))}
+.row2::-webkit-scrollbar{display:none}
+#inputProxy{position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0}
 </style>
 </head>
 <body>
 <div class="header">
   <h1>Render Shell</h1>
   <span class="status off" id="connStatus">Connecting...</span>
-  <a href="/">&larr; Dashboard</a>
+  <a href="/" style="margin-left:auto">&larr; Dashboard</a>
 </div>
-<div id="term"></div>
+<div id="termWrap"><div id="term"></div></div>
+<div class="keys" id="extraKeys">
+  <button class="kb" data-k="esc">esc</button>
+  <button class="kb" data-mod="ctrl">ctrl</button>
+  <button class="kb" data-mod="alt">alt</button>
+  <button class="kb" data-k="tab">tab</button>
+  <button class="kb" data-k="left">&larr;</button>
+  <button class="kb" data-k="up">&uarr;</button>
+  <button class="kb" data-k="down">&darr;</button>
+  <button class="kb" data-k="right">&rarr;</button>
+  <button class="kb" data-k="home">home</button>
+  <button class="kb" data-k="end">end</button>
+  <button class="kb" data-k="pgup">pgup</button>
+  <button class="kb" data-k="pgdn">pgdn</button>
+  <button class="kb" data-k="bksp">&#9003;</button>
+  <button class="kb" data-k="pipe">|</button>
+  <button class="kb" data-k="dash">-</button>
+  <button class="kb" data-k="slash">/</button>
+  <button class="kb" data-k="tilde">~</button>
+  <button class="kb" data-k="dollar">$</button>
+  <button class="kb" data-k="enter">enter</button>
+  <button class="kb" data-k="space">space</button>
+</div>
 <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
 <script>
+const status=document.getElementById('connStatus');
+const wrap=document.getElementById('termWrap');
+
 const term=new Terminal({
-  theme:{background:'#0a0e14',foreground:'#c8cdd5',cursor:'#22c55e',cursorAccent:'#000',selectionBackground:'#264f78'},
-  fontFamily:'monospace',fontSize:13,cursorBlink:true,scrollback:10000
+  theme:{background:'#0a0e14',foreground:'#c8cdd5',cursor:'#22c55e',cursorAccent:'#000',selectionBackground:'#264f78',
+    black:'#1c1c1c',red:'#ff5555',green:'#50fa7b',yellow:'#f1fa8c',blue:'#bd93f9',magenta:'#ff79c6',cyan:'#8be9fd',white:'#d8d8d8',
+    brightBlack:'#6272a4',brightRed:'#ff6e6e',brightGreen:'#69ff94',brightYellow:'#ffffa5',brightMagenta:'#ff92df',brightCyan:'#a4ffff',brightWhite:'#ffffff'},
+  fontFamily:'ui-monospace,SFMono-Regular,Menlo,Consolas,monospace',
+  fontSize:14,cursorBlink:true,scrollback:10000,
+  allowProposedApi:true,convertEol:false,
+  macOptionIsMeta:true,scrollOnUserInput:true,
+  minimumContrastRatio:0
 });
 const fitAddon=new FitAddon.FitAddon();
 term.loadAddon(fitAddon);
@@ -1111,30 +1190,145 @@ term.open(document.getElementById('term'));
 fitAddon.fit();
 term.focus();
 
-const status=document.getElementById('connStatus');
-
-async function sendInput(keys){
-  const {cols,rows}=term;
-  try{await fetch('/render-shell/input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keys,cols,rows})})}catch(e){}
+function safeFit(){
+  try{fitAddon.fit()}catch(e){}
+  term.focus();
+}
+function viewportFix(){
+  const vv=window.visualViewport;
+  if(vv){ document.body.style.height=vv.height+'px'; }
+  setTimeout(safeFit,80);
+}
+window.addEventListener('resize',viewportFix);
+window.addEventListener('orientationchange',()=>setTimeout(viewportFix,300));
+if(window.visualViewport){
+  window.visualViewport.addEventListener('resize',viewportFix);
+  window.visualViewport.addEventListener('scroll',viewportFix);
 }
 
-term.onData(d=>sendInput(d));
+const KEYMAP={
+  esc:'\x1b', tab:'\t',
+  left:'\x1b[D', up:'\x1b[A', down:'\x1b[B', right:'\x1b[C',
+  home:'\x1b[H', end:'\x1b[F', pgup:'\x1b[5~', pgdn:'\x1b[6~',
+  bksp:'\x7f', enter:'\r', space:' ',
+  pipe:'|', dash:'-', slash:'/', tilde:'~', dollar:'$'
+};
 
-term.onResize(({cols,rows})=>{
-  fetch('/render-shell/input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({resize:true,cols,rows})}).catch(()=>{});
+let ctrlArmed=false, altArmed=false;
+
+function ctrlSeq(d){
+  if(d.length===1){
+    const c=d.charCodeAt(0);
+    if(d>='a'&&d<='z') return String.fromCharCode(c-96);
+    if(d>='A'&&d<='Z') return String.fromCharCode(c-64);
+    if(d===' ') return '\x00';
+    if(d==='@') return '\x00';
+    if(d==='[') return '\x1b';
+    if(d==='\\') return '\x1c';
+    if(d===']') return '\x1d';
+    if(d==='^') return '\x1e';
+    if(d==='_') return '\x1f';
+    if(d==='?') return '\x7f';
+    if(c>=96&&c<=127) return String.fromCharCode(c-96);
+  }
+  return d;
+}
+
+function buildInput(raw, isChar){
+  let d=raw;
+  const csi=d.startsWith('\x1b[');
+  if(ctrlArmed && isChar) d=ctrlSeq(d);
+  else if(ctrlArmed && csi){
+    d=d.replace(/\[([A-Z0-9~])$/,'[1;5$1');
+  }
+  if(altArmed){
+    if(csi && !ctrlArmed) d=d.replace(/\[([A-Z0-9~])$/,'[1;3$1');
+    else if(!(d.startsWith('\x1b')&&d.length>2)) d='\x1b'+d;
+  }
+  return d;
+}
+
+let outBuf='', outTimer=null;
+function sendRaw(d){
+  outBuf+=d;
+  if(outTimer) return;
+  outTimer=setTimeout(()=>{
+    const keys=outBuf; outBuf=''; outTimer=null;
+    fetch('/render-shell/input',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({keys,cols:term.cols,rows:term.rows})}).catch(()=>{});
+  },25);
+}
+
+term.onData(d=>{
+  const isChar=d.length===1&&!d.startsWith('\x1b');
+  sendRaw(buildInput(d,isChar));
 });
 
-window.addEventListener('resize',()=>{fitAddon.fit();term.focus()});
+let resizeTimer=null;
+term.onResize(({cols,rows})=>{
+  clearTimeout(resizeTimer);
+  resizeTimer=setTimeout(()=>{
+    fetch('/render-shell/input',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({resize:true,cols,rows})}).catch(()=>{});
+  },120);
+});
 
-const es=new EventSource('/render-shell/output');
-es.onopen=()=>{status.textContent='Connected';status.className='status on'};
-es.onerror=()=>{status.textContent='Reconnecting...';status.className='status off'};
-es.onmessage=e=>{
-  try{
-    const d=JSON.parse(e.data);
-    if(d.text){term.write(d.text);term.scrollToBottom()}
-  }catch(ex){}
-};
+const extraKeys=document.getElementById('extraKeys');
+extraKeys.addEventListener('pointerdown',e=>{
+  const b=e.target.closest('.kb');
+  if(!b) return;
+  e.preventDefault();
+});
+extraKeys.addEventListener('click',e=>{
+  const b=e.target.closest('.kb');
+  if(!b) return;
+  if(b.dataset.mod){
+    if(b.dataset.mod==='ctrl'){ctrlArmed=!ctrlArmed;b.classList.toggle('armed',ctrlArmed)}
+    else{altArmed=!altArmed;b.classList.toggle('armed',altArmed)}
+    term.focus();
+    return;
+  }
+  const seq=KEYMAP[b.dataset.k];
+  if(seq!==undefined){
+    const isChar=seq.length===1&&!seq.startsWith('\x1b');
+    sendRaw(buildInput(seq,isChar));
+    term.focus();
+  }
+});
+
+wrap.addEventListener('click',()=>term.focus());
+
+let pendingText='', writeRaf=null;
+function queueWrite(t){
+  pendingText+=t;
+  if(writeRaf) return;
+  writeRaf=requestAnimationFrame(()=>{
+    const txt=pendingText; pendingText=''; writeRaf=null;
+    const atBottom=term.buffer.active.viewportY>=term.buffer.active.baseY-2;
+    term.write(txt,()=>{
+      if(atBottom) term.scrollToBottom();
+    });
+  });
+}
+
+let es=null;
+function connectSSE(){
+  es=new EventSource('/render-shell/output');
+  es.onopen=()=>{status.textContent='Connected';status.className='status on'};
+  es.onerror=()=>{status.textContent='Reconnecting...';status.className='status off'};
+  es.onmessage=e=>{
+    try{
+      const d=JSON.parse(e.data);
+      if(d.text) queueWrite(d.text);
+    }catch(ex){}
+  };
+}
+connectSSE();
+
+document.addEventListener('visibilitychange',()=>{
+  if(!document.hidden){ safeFit(); }
+});
+term.focus();
 </script>
 </body>
 </html>"""
