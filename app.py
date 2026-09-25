@@ -1158,7 +1158,7 @@ body{background:#0a0e14;color:#c8cdd5;font-family:-apple-system,system-ui,sans-s
 #term{position:absolute;inset:0;padding:3px 2px}
 .xterm-viewport::-webkit-scrollbar{width:4px}
 .xterm-viewport::-webkit-scrollbar-thumb{background:#1e2530;border-radius:2px}
-.xterm-helper-textarea{opacity:0!important;left:0!important;top:0!important;caret-color:transparent!important;color:transparent!important;background:transparent!important;-webkit-text-fill-color:transparent!important}
+.xterm-helper-textarea{position:absolute!important;left:-9999px!important;top:0!important;width:1px!important;height:1px!important;opacity:0!important;overflow:hidden!important;caret-color:transparent!important;color:transparent!important;background:transparent!important;-webkit-text-fill-color:transparent!important;border:none!important;padding:0!important;outline:none!important;resize:none!important}
 .xterm-helper-textarea::selection{background:transparent}
 .xterm{position:relative}
 
@@ -1235,26 +1235,7 @@ term.onResize(({cols,rows})=>{
 term.open(document.getElementById('term'));
 fitAddon.fit();
 
-const imeTa=document.querySelector('.xterm-helper-textarea');
-function syncIme(){
-  if(!imeTa) return;
-  try{
-    const scr=term.element.querySelector('.xterm-screen');
-    if(!scr) return;
-    const er=term.element.getBoundingClientRect();
-    const sr=scr.getBoundingClientRect();
-    const cw=sr.width/term.cols, ch=sr.height/term.rows;
-    const b=term.buffer.active;
-    const col=Math.max(0,Math.min(term.cols-1,b.cursorX));
-    const row=Math.max(0,Math.min(term.rows-1,b.cursorY));
-    const x=(sr.left-er.left)+col*cw;
-    const y=(sr.top-er.top)+row*ch;
-    imeTa.style.transform='translate('+x+'px,'+y+'px)';
-    imeTa.style.width=cw+'px';
-    imeTa.style.height=ch+'px';
-  }catch(e){}
-}
-term.onCursorMove(()=>syncIme());
+function syncIme(){}
 
 function safeFit(){
   try{fitAddon.fit()}catch(e){}
