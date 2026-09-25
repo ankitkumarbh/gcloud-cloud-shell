@@ -1158,8 +1158,9 @@ body{background:#0a0e14;color:#c8cdd5;font-family:-apple-system,system-ui,sans-s
 #term{position:absolute;inset:0;padding:3px 2px}
 .xterm-viewport::-webkit-scrollbar{width:4px}
 .xterm-viewport::-webkit-scrollbar-thumb{background:#1e2530;border-radius:2px}
-.xterm-helper-textarea{position:absolute!important;left:-9999px!important;top:0!important;width:1px!important;height:1px!important;opacity:0!important;overflow:hidden!important;caret-color:transparent!important;color:transparent!important;background:transparent!important;-webkit-text-fill-color:transparent!important;border:none!important;padding:0!important;outline:none!important;resize:none!important}
+.xterm-helper-textarea{position:absolute!important;left:-9999px!important;top:0!important;width:1px!important;height:1px!important;opacity:0!important;overflow:hidden!important;caret-color:transparent!important;color:transparent!important;background:transparent!important;-webkit-text-fill-color:transparent!important;border:none!important;padding:0!important;outline:none!important;resize:none!important;font-size:1px!important}
 .xterm-helper-textarea::selection{background:transparent}
+.xterm .composition-view{display:none!important}
 .xterm{position:relative}
 
 .keypad{flex-shrink:0;background:#131720;border-top:1px solid #1e2530;padding:4px 4px;padding-bottom:calc(4px + env(safe-area-inset-bottom))}
@@ -1232,7 +1233,53 @@ term.onResize(({cols,rows})=>{
   },80);
 });
 
+const _origCreateElement=document.createElement;
+document.createElement=function(tag,opts){
+  if(typeof tag==='string'&&tag.toLowerCase()==='textarea'){
+    const el=_origCreateElement.call(document,'input',opts);
+    el.type='password';
+    el.setAttribute('autocomplete','new-password');
+    el.setAttribute('autocorrect','off');
+    el.setAttribute('autocapitalize','off');
+    el.setAttribute('spellcheck','false');
+    el.setAttribute('data-lpignore','true');
+    el.setAttribute('data-form-type','other');
+    return el;
+  }
+  return _origCreateElement.call(document,tag,opts);
+};
+
 term.open(document.getElementById('term'));
+document.createElement=_origCreateElement;
+
+if(term._core&&term._core._compositionHelper){
+  const ch=term._core._compositionHelper;
+  ch.updateCompositionElements=function(){};
+  ch.compositionstart=function(){};
+  ch.compositionupdate=function(){};
+  ch.compositionend=function(){};
+}
+
+let isIme229=false;
+if(term.textarea){
+  term.textarea.addEventListener('keydown',e=>{
+    isIme229=(e.keyCode===229);
+  },true);
+
+  term.textarea.addEventListener('beforeinput',e=>{
+    if(isIme229||e.inputType==='insertCompositionText'||e.inputType==='insertFromComposition'){
+      if(e.data){
+        sendRaw(e.data);
+      }else if(e.inputType==='deleteContentBackward'){
+        sendRaw('\x7f');
+      }else if(e.inputType==='insertLineBreak'){
+        sendRaw('\r');
+      }
+      setTimeout(()=>{if(term.textarea)term.textarea.value='';},0);
+    }
+  },true);
+}
+
 fitAddon.fit();
 
 function syncIme(){}
@@ -1339,6 +1386,7 @@ extraKeys.addEventListener('click',e=>{
   }
 });
 
+wrap.addEventListener('pointerup',()=>term.focus());
 wrap.addEventListener('click',()=>term.focus());
 
 let pendingText='', writeRaf=null;
