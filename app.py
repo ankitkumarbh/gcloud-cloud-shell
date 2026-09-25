@@ -1129,14 +1129,12 @@ body{background:#0a0e14;color:#c8cdd5;font-family:-apple-system,system-ui,sans-s
 .xterm-viewport::-webkit-scrollbar{width:4px}
 .xterm-viewport::-webkit-scrollbar-thumb{background:#1e2530;border-radius:2px}
 
-.keys{display:flex;gap:5px;overflow-x:auto;white-space:nowrap;flex-shrink:0;padding:6px 8px;padding-bottom:calc(6px + env(safe-area-inset-bottom));background:#131720;border-top:1px solid #1e2530;-webkit-overflow-scrolling:touch;scrollbar-width:none}
-.keys::-webkit-scrollbar{display:none}
-.kb{flex-shrink:0;min-width:38px;height:38px;padding:0 10px;background:#1a2030;border:1px solid #2a3345;border-radius:7px;color:#c8cdd5;font-size:13px;font-family:ui-monospace,Menlo,monospace;cursor:pointer;user-select:none;-webkit-user-select:none;touch-action:manipulation;display:flex;align-items:center;justify-content:center}
+.keypad{flex-shrink:0;background:#131720;border-top:1px solid #1e2530;padding:4px 4px;padding-bottom:calc(4px + env(safe-area-inset-bottom))}
+.krow{display:flex;gap:4px}
+.krow+.krow{margin-top:4px}
+.kb{flex:1 1 0;min-width:0;height:36px;padding:0 1px;background:#1a2030;border:1px solid #2a3345;border-radius:6px;color:#c8cdd5;font-size:12px;font-family:ui-monospace,Menlo,monospace;cursor:pointer;user-select:none;-webkit-user-select:none;touch-action:manipulation;display:flex;align-items:center;justify-content:center;white-space:nowrap;overflow:hidden}
 .kb:active{background:#2563eb;border-color:#2563eb;color:#fff}
 .kb.armed{background:#2563eb;border-color:#60a5fa;color:#fff;box-shadow:0 0 0 2px #2563eb55}
-.row2{display:flex;gap:5px;overflow-x:auto;flex-shrink:0;padding:0 8px 6px;background:#131720;scrollbar-width:none;padding-bottom:calc(6px + env(safe-area-inset-bottom))}
-.row2::-webkit-scrollbar{display:none}
-#inputProxy{position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0}
 </style>
 </head>
 <body>
@@ -1146,27 +1144,31 @@ body{background:#0a0e14;color:#c8cdd5;font-family:-apple-system,system-ui,sans-s
   <a href="/" style="margin-left:auto">&larr; Dashboard</a>
 </div>
 <div id="termWrap"><div id="term"></div></div>
-<div class="keys" id="extraKeys">
-  <button class="kb" data-k="esc">esc</button>
-  <button class="kb" data-mod="ctrl">ctrl</button>
-  <button class="kb" data-mod="alt">alt</button>
-  <button class="kb" data-k="tab">tab</button>
-  <button class="kb" data-k="left">&larr;</button>
-  <button class="kb" data-k="up">&uarr;</button>
-  <button class="kb" data-k="down">&darr;</button>
-  <button class="kb" data-k="right">&rarr;</button>
-  <button class="kb" data-k="home">home</button>
-  <button class="kb" data-k="end">end</button>
-  <button class="kb" data-k="pgup">pgup</button>
-  <button class="kb" data-k="pgdn">pgdn</button>
-  <button class="kb" data-k="bksp">&#9003;</button>
-  <button class="kb" data-k="pipe">|</button>
-  <button class="kb" data-k="dash">-</button>
-  <button class="kb" data-k="slash">/</button>
-  <button class="kb" data-k="tilde">~</button>
-  <button class="kb" data-k="dollar">$</button>
-  <button class="kb" data-k="enter">enter</button>
-  <button class="kb" data-k="space">space</button>
+<div class="keypad" id="extraKeys">
+  <div class="krow">
+    <button class="kb" data-k="esc">esc</button>
+    <button class="kb" data-mod="ctrl">ctrl</button>
+    <button class="kb" data-mod="alt">alt</button>
+    <button class="kb" data-k="tab">tab</button>
+    <button class="kb" data-k="left">&larr;</button>
+    <button class="kb" data-k="up">&uarr;</button>
+    <button class="kb" data-k="down">&darr;</button>
+    <button class="kb" data-k="right">&rarr;</button>
+    <button class="kb" data-k="home">home</button>
+    <button class="kb" data-k="end">end</button>
+  </div>
+  <div class="krow">
+    <button class="kb" data-k="pgup">pgup</button>
+    <button class="kb" data-k="pgdn">pgdn</button>
+    <button class="kb" data-k="bksp">&#9003;</button>
+    <button class="kb" data-k="pipe">|</button>
+    <button class="kb" data-k="dash">-</button>
+    <button class="kb" data-k="slash">/</button>
+    <button class="kb" data-k="tilde">~</button>
+    <button class="kb" data-k="dollar">$</button>
+    <button class="kb" data-k="space">spc</button>
+    <button class="kb" data-k="enter">enter</button>
+  </div>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
@@ -1192,6 +1194,7 @@ term.focus();
 
 function safeFit(){
   try{fitAddon.fit()}catch(e){}
+  try{term.refresh(0,term.rows-1)}catch(e){}
   term.focus();
 }
 function viewportFix(){
@@ -1260,8 +1263,13 @@ function sendRaw(d){
 }
 
 term.onData(d=>{
+  if(/^\x1b\[\d+;\d+R$/.test(d)){ sendRaw(d); return; }
   const isChar=d.length===1&&!d.startsWith('\x1b');
   sendRaw(buildInput(d,isChar));
+  try{
+    if(term.buffer.active.viewportY<term.buffer.active.baseY-1) term.scrollToBottom();
+    term.refresh(term.buffer.active.cursorY,term.buffer.active.cursorY);
+  }catch(e){}
 });
 
 let resizeTimer=null;
@@ -1306,7 +1314,10 @@ function queueWrite(t){
     const txt=pendingText; pendingText=''; writeRaf=null;
     const atBottom=term.buffer.active.viewportY>=term.buffer.active.baseY-2;
     term.write(txt,()=>{
-      if(atBottom) term.scrollToBottom();
+      if(atBottom){
+        term.scrollToBottom();
+        term.refresh(term.buffer.active.cursorY,term.buffer.active.cursorY);
+      }
     });
   });
 }
