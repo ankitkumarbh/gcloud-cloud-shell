@@ -1237,11 +1237,14 @@ const _origCreateElement=document.createElement;
 document.createElement=function(tag,opts){
   if(typeof tag==='string'&&tag.toLowerCase()==='textarea'){
     const el=_origCreateElement.call(document,'input',opts);
-    el.type='password';
-    el.setAttribute('autocomplete','new-password');
+    el.type='text';
+    el.name='term_input';
+    el.id='term_input';
+    el.setAttribute('autocomplete','off');
     el.setAttribute('autocorrect','off');
     el.setAttribute('autocapitalize','off');
     el.setAttribute('spellcheck','false');
+    el.setAttribute('enterkeyhint','go');
     el.setAttribute('data-lpignore','true');
     el.setAttribute('data-form-type','other');
     return el;
@@ -1267,11 +1270,14 @@ if(term.textarea){
   },true);
 
   term.textarea.addEventListener('beforeinput',e=>{
-    if(isIme229||e.inputType==='insertCompositionText'||e.inputType==='insertFromComposition'){
+    if(isIme229||e.inputType==='insertCompositionText'||e.inputType==='insertFromComposition'||e.inputType==='deleteContentBackward'||e.inputType==='insertLineBreak'){
+      if(e.cancelable)e.preventDefault();
       if(e.data){
         sendRaw(e.data);
       }else if(e.inputType==='deleteContentBackward'){
         sendRaw('\x7f');
+      }else if(e.inputType==='deleteWordBackward'){
+        sendRaw('\x17');
       }else if(e.inputType==='insertLineBreak'){
         sendRaw('\r');
       }
