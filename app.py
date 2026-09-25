@@ -1035,6 +1035,13 @@ _render_shell_pty = RenderShellPTY()
 BUILD_ID = str(int(time.time()))
 
 
+@app.route("/build-id")
+def build_id_endpoint():
+    resp = Response(BUILD_ID, mimetype="text/plain")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
 @app.route("/render-shell")
 @login_required
 def render_shell_page():
@@ -1044,7 +1051,7 @@ def render_shell_page():
         return redirect(f"/render-shell?{urlencode(args)}")
     if not _render_shell_pty.alive:
         _render_shell_pty.start()
-    resp = make_response(render_template_string(RENDER_SHELL_HTML))
+    resp = make_response(render_template_string(RENDER_SHELL_HTML, build_id=BUILD_ID))
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     resp.headers["Pragma"] = "no-cache"
     return resp
@@ -1153,6 +1160,7 @@ body{background:#0a0e14;color:#c8cdd5;font-family:-apple-system,system-ui,sans-s
 .xterm-viewport::-webkit-scrollbar-thumb{background:#1e2530;border-radius:2px}
 .xterm-helper-textarea{caret-color:transparent!important;color:transparent!important;background:transparent!important}
 .xterm-helper-textarea::selection{background:transparent}
+.xterm{position:relative}
 
 .keypad{flex-shrink:0;background:#131720;border-top:1px solid #1e2530;padding:4px 4px;padding-bottom:calc(4px + env(safe-area-inset-bottom))}
 .krow{display:flex;gap:4px}
@@ -1166,6 +1174,7 @@ body{background:#0a0e14;color:#c8cdd5;font-family:-apple-system,system-ui,sans-s
 <div class="header">
   <h1>Render Shell</h1>
   <span class="status off" id="connStatus">Connecting...</span>
+  <span style="font-size:9px;color:#4b5563;font-family:ui-monospace,monospace" id="buildBadge">{{build_id}}</span>
   <a href="/" style="margin-left:auto">&larr; Dashboard</a>
 </div>
 <div id="termWrap"><div id="term"></div></div>
@@ -1226,8 +1235,29 @@ term.onResize(({cols,rows})=>{
 term.open(document.getElementById('term'));
 fitAddon.fit();
 
+const imeTa=document.querySelector('.xterm-helper-textarea');
+function syncIme(){
+  if(!imeTa) return;
+  try{
+    const scr=term.element.querySelector('.xterm-screen');
+    if(!scr) return;
+    const er=term.element.getBoundingClientRect();
+    const sr=scr.getBoundingClientRect();
+    const cw=sr.width/term.cols, ch=sr.height/term.rows;
+    const b=term.buffer.active;
+    const row=Math.max(0,Math.min(term.rows-1,b.cursorY-b.baseY));
+    const col=Math.max(0,Math.min(term.cols-1,b.cursorX));
+    imeTa.style.left=((sr.left-er.left)+col*cw)+'px';
+    imeTa.style.top=((sr.top-er.top)+row*ch)+'px';
+    imeTa.style.width=cw+'px';
+    imeTa.style.height=ch+'px';
+  }catch(e){}
+}
+term.onCursorMove(()=>syncIme());
+
 function safeFit(){
   try{fitAddon.fit()}catch(e){}
+  syncIme();
   term.focus();
 }
 function viewportFix(){
@@ -1338,6 +1368,7 @@ function queueWrite(t){
     const atBottom=term.buffer.active.viewportY>=term.buffer.active.baseY-2;
     term.write(txt,()=>{
       if(atBottom) term.scrollToBottom();
+      syncIme();
     });
   });
 }
@@ -1357,8 +1388,23 @@ function connectSSE(){
 connectSSE();
 
 document.addEventListener('visibilitychange',()=>{
-  if(!document.hidden){ safeFit(); }
+  if(!document.hidden){ safeFit(); checkVer(); }
 });
+
+const MYV='{{build_id}}';
+function checkVer(){
+  fetch('/build-id',{cache:'no-store'}).then(r=>r.text()).then(t=>{
+    t=t.trim();
+    if(t && t!==MYV){
+      const u=new URL(location.href);
+      u.searchParams.set('v',t);
+      location.replace(u.toString());
+    }
+  }).catch(()=>{});
+}
+checkVer();
+setTimeout(checkVer,2000);
+
 term.focus();
 </script>
 </body>
