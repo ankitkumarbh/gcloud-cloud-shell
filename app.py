@@ -926,15 +926,18 @@ def render_shell_page():
 
 @app.route("/ws/shell")
 def ws_shell():
-    ws = Server.accept(request.environ, path="/ws/shell")
+    try:
+        ws = Server.accept(request.environ)
+    except Exception as e:
+        _log(f"[render-shell] WebSocket accept failed: {e}")
+        return f"WebSocket failed: {e}", 500
     if ws is None:
         return "WebSocket upgrade failed", 400
 
-    if not AUTH_PASSWORD:
-        pass
-    elif not session.get("authed"):
+    if AUTH_PASSWORD:
         token = request.args.get("token", "")
-        if not (token and secrets.compare_digest(token, AUTH_PASSWORD)):
+        authed = session.get("authed") or (token and secrets.compare_digest(token, AUTH_PASSWORD))
+        if not authed:
             ws.close()
             return "Unauthorized", 401
 
