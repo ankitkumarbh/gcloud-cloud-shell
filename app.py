@@ -7,11 +7,17 @@ import logging
 import threading
 import subprocess
 import queue
+import pty
+import select
+import fcntl
+import termios
+import struct
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 from collections import deque
 from flask import Flask, request, jsonify, Response, render_template_string, session, redirect, url_for
+from simple_websocket import Server, ConnectionClosed
 import zoneinfo
 
 _TZ_IST = zoneinfo.ZoneInfo("Asia/Kolkata")
@@ -912,6 +918,152 @@ def tmux_send():
     return jsonify({"status": "sent"})
 
 
+@app.route("/render-shell")
+@login_required
+def render_shell_page():
+    return render_template_string(RENDER_SHELL_HTML)
+
+
+@app.route("/ws/shell")
+def ws_shell():
+    ws = Server.accept(request.environ, path="/ws/shell")
+    if ws is None:
+        return "WebSocket upgrade failed", 400
+
+    if not AUTH_PASSWORD:
+        pass
+    elif not session.get("authed"):
+        token = request.args.get("token", "")
+        if not (token and secrets.compare_digest(token, AUTH_PASSWORD)):
+            ws.close()
+            return "Unauthorized", 401
+
+    _log("[render-shell] Client connected")
+
+    pid, master_fd = pty.fork()
+    if pid == 0:
+        os.environ["TERM"] = "xterm-256color"
+        os.environ["COLUMNS"] = "80"
+        os.environ["LINES"] = "24"
+        os.execvp("/bin/bash", ["/bin/bash", "-l"])
+
+    os.set_blocking(master_fd, False)
+    fcntl.ioctl(master_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+
+    def winch_handler(signum, frame):
+        pass
+
+    def pty_reader():
+        try:
+            while True:
+                r, _, _ = select.select([master_fd], [], [], 0.1)
+                if r:
+                    try:
+                        data = os.read(master_fd, 4096)
+                        if not data:
+                            break
+                        ws.send(data)
+                    except (OSError, ConnectionClosed):
+                        break
+        except Exception:
+            pass
+
+    reader_thread = threading.Thread(target=pty_reader, daemon=True)
+    reader_thread.start()
+
+    try:
+        while True:
+            try:
+                msg = ws.receive(timeout=30)
+            except Exception:
+                break
+            if msg is None:
+                break
+            if isinstance(msg, bytes):
+                os.write(master_fd, msg)
+            else:
+                os.write(master_fd, msg.encode())
+    except ConnectionClosed:
+        pass
+    except Exception:
+        pass
+    finally:
+        try:
+            os.close(master_fd)
+        except Exception:
+            pass
+        try:
+            os.kill(pid, 9)
+        except Exception:
+            pass
+        _log("[render-shell] Client disconnected")
+
+    return "", 200
+
+
+RENDER_SHELL_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Render Shell</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0e14;color:#c8cdd5;font-family:-apple-system,system-ui,sans-serif;overflow:hidden;height:100vh;display:flex;flex-direction:column}
+.header{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid #1e2530;background:#131720;flex-shrink:0}
+.header h1{font-size:14px;font-weight:700;color:#fff}
+.header a{color:#3b82f6;font-size:12px;text-decoration:none;margin-left:auto}
+#term{flex:1;padding:4px}
+.xterm-viewport::-webkit-scrollbar{width:4px}
+.xterm-viewport::-webkit-scrollbar-thumb{background:#1e2530;border-radius:2px}
+.status{font-size:11px;padding:2px 8px;border-radius:6px}
+.status.on{background:#052e16;color:#22c55e}
+.status.off{background:#450a0a;color:#ef4444}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>Render Shell</h1>
+  <span class="status off" id="connStatus">Connecting...</span>
+  <a href="/">&larr; Dashboard</a>
+</div>
+<div id="term"></div>
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+<script>
+const term=new Terminal({
+  theme:{background:'#0a0e14',foreground:'#c8cdd5',cursor:'#22c55e',cursorAccent:'#000',selectionBackground:'#264f78'},
+  fontFamily:'monospace',fontSize:13,cursorBlink:true,scrollback:10000
+});
+const fitAddon=new FitAddon.FitAddon();
+term.loadAddon(fitAddon);
+term.open(document.getElementById('term'));
+fitAddon.fit();
+window.addEventListener('resize',()=>fitAddon.fit());
+term.focus();
+
+const status=document.getElementById('connStatus');
+const proto=location.protocol==='https:'?'wss':'ws';
+const ws=new WebSocket(`${proto}://${location.host}/ws/shell`);
+
+ws.onopen=()=>{status.textContent='Connected';status.className='status on'};
+ws.onclose=()=>{status.textContent='Disconnected';status.className='status off';setTimeout(()=>location.reload(),3000)};
+ws.onerror=()=>{status.textContent='Error';status.className='status off'};
+
+ws.onmessage=e=>{if(typeof e.data==='string')term.write(e.data);else term.write(new Uint8Array(e.data))};
+
+term.onData(d=>{if(ws.readyState===1)ws.send(d)});
+
+term.onResize(({cols,rows})=>{
+  if(ws.readyState===1)ws.send(JSON.stringify({type:'resize',cols,rows}));
+});
+</script>
+</body>
+</html>"""
+
+
 DASHBOARD_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -987,6 +1139,7 @@ a{color:var(--blue)}
   <h1>GCloud Shell</h1>
   <span class="badge initializing" id="badge">initializing</span>
   <span style="flex:1"></span>
+  <a href="/render-shell" style="font-size:12px;color:var(--blue);text-decoration:none;padding:4px 8px;border:1px solid var(--border);border-radius:6px">Render Shell</a>
   <span id="uptime" style="font-size:11px;color:var(--dim)"></span>
 </div>
 <div class="content">
