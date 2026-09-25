@@ -930,6 +930,8 @@ class RenderShellPTY:
         self.reader_thread = None
         self.seq = 0
         self.buffer_start_seq = 0
+        self.cols = 80
+        self.rows = 24
 
     def start(self, cols=80, rows=24):
         if self.alive:
@@ -938,6 +940,8 @@ class RenderShellPTY:
             self.output_buffer.clear()
             self.seq = 0
             self.buffer_start_seq = 0
+        self.cols = cols
+        self.rows = rows
         self.pid, self.master_fd = pty.fork()
         if self.pid == 0:
             os.environ["TERM"] = "xterm-256color"
@@ -991,6 +995,12 @@ class RenderShellPTY:
         if self.alive and self.master_fd is not None:
             try:
                 fcntl.ioctl(self.master_fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+                self.cols = cols
+                self.rows = rows
+                try:
+                    os.kill(self.pid, 28)  # SIGWINCH
+                except Exception:
+                    pass
                 return True
             except OSError:
                 pass
@@ -1037,7 +1047,7 @@ def render_shell_output():
         last_id = 0
 
     def generate():
-        q = queue.Queue(maxsize=2000)
+        q = queue.Queue(maxsize=8000)
         with _render_shell_pty.lock:
             _render_shell_pty.subscribers.append(q)
             buf_text = "".join(_render_shell_pty.output_buffer)
@@ -1086,11 +1096,12 @@ def render_shell_input():
         _render_shell_pty.start()
     data = request.get_json(force=True)
     keys = data.get("keys", "")
-    cols = data.get("cols", 80)
-    rows = data.get("rows", 24)
-    if data.get("resize"):
+    cols = data.get("cols", 0)
+    rows = data.get("rows", 0)
+    if data.get("resize") or (cols and rows and (cols != _render_shell_pty.cols or rows != _render_shell_pty.rows)):
         _render_shell_pty.resize(cols, rows)
-        return jsonify({"status": "resized"})
+        if data.get("resize"):
+            return jsonify({"status": "resized"})
     if keys:
         _render_shell_pty.write(keys)
     return jsonify({"status": "ok"})
@@ -1188,13 +1199,21 @@ const term=new Terminal({
 });
 const fitAddon=new FitAddon.FitAddon();
 term.loadAddon(fitAddon);
+
+let resizeTimer=null;
+term.onResize(({cols,rows})=>{
+  clearTimeout(resizeTimer);
+  resizeTimer=setTimeout(()=>{
+    fetch('/render-shell/input',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({resize:true,cols,rows})}).catch(()=>{});
+  },80);
+});
+
 term.open(document.getElementById('term'));
 fitAddon.fit();
-term.focus();
 
 function safeFit(){
   try{fitAddon.fit()}catch(e){}
-  try{term.refresh(0,term.rows-1)}catch(e){}
   term.focus();
 }
 function viewportFix(){
@@ -1268,17 +1287,7 @@ term.onData(d=>{
   sendRaw(buildInput(d,isChar));
   try{
     if(term.buffer.active.viewportY<term.buffer.active.baseY-1) term.scrollToBottom();
-    term.refresh(term.buffer.active.cursorY,term.buffer.active.cursorY);
   }catch(e){}
-});
-
-let resizeTimer=null;
-term.onResize(({cols,rows})=>{
-  clearTimeout(resizeTimer);
-  resizeTimer=setTimeout(()=>{
-    fetch('/render-shell/input',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({resize:true,cols,rows})}).catch(()=>{});
-  },120);
 });
 
 const extraKeys=document.getElementById('extraKeys');
@@ -1314,10 +1323,7 @@ function queueWrite(t){
     const txt=pendingText; pendingText=''; writeRaf=null;
     const atBottom=term.buffer.active.viewportY>=term.buffer.active.baseY-2;
     term.write(txt,()=>{
-      if(atBottom){
-        term.scrollToBottom();
-        term.refresh(term.buffer.active.cursorY,term.buffer.active.cursorY);
-      }
+      if(atBottom) term.scrollToBottom();
     });
   });
 }
