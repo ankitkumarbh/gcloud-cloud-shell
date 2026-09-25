@@ -16,7 +16,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 from collections import deque
-from flask import Flask, request, jsonify, Response, render_template_string, session, redirect, url_for
+from flask import Flask, request, jsonify, Response, render_template_string, session, redirect, url_for, make_response
 import zoneinfo
 
 _TZ_IST = zoneinfo.ZoneInfo("Asia/Kolkata")
@@ -1035,7 +1035,10 @@ _render_shell_pty = RenderShellPTY()
 def render_shell_page():
     if not _render_shell_pty.alive:
         _render_shell_pty.start()
-    return render_template_string(RENDER_SHELL_HTML)
+    resp = make_response(render_template_string(RENDER_SHELL_HTML))
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
 
 
 @app.route("/render-shell/output")
@@ -1139,6 +1142,8 @@ body{background:#0a0e14;color:#c8cdd5;font-family:-apple-system,system-ui,sans-s
 #term{position:absolute;inset:0;padding:3px 2px}
 .xterm-viewport::-webkit-scrollbar{width:4px}
 .xterm-viewport::-webkit-scrollbar-thumb{background:#1e2530;border-radius:2px}
+.xterm-helper-textarea{caret-color:transparent!important;color:transparent!important;background:transparent!important}
+.xterm-helper-textarea::selection{background:transparent}
 
 .keypad{flex-shrink:0;background:#131720;border-top:1px solid #1e2530;padding:4px 4px;padding-bottom:calc(4px + env(safe-area-inset-bottom))}
 .krow{display:flex;gap:4px}
